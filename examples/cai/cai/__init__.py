@@ -1,20 +1,27 @@
 """
-CompDam_DGD Compression-After-Impact (CAI) model generator.
+Standalone CompDam_DGD Compression-After-Impact (CAI) model generator.
 
-The package keeps pure-Python logic, which you can test without Abaqus, apart
-from the builders that call the Abaqus Scripting Interface:
+Plain Python (2.7 or 3.x, no third-party packages, no Abaqus/CAE): it builds
+fibre-aligned ply meshes, sizes the delamination zone with Turon's
+cohesive-zone equations and writes a complete Abaqus/Explicit input deck,
+plus the files to run it with a pre-compiled CompDam library on a cluster.
 
-Pure Python (unit tested with ``uv run pytest``)
-    :mod:`cai.settings`, :mod:`cai.compdam`, :mod:`cai.layup`,
-    :mod:`cai.damage_map`, :mod:`cai.inp_patcher`, :mod:`cai.validation`
-
-Abaqus kernel only
-    :mod:`cai.geometry`, :mod:`cai.material_section`, :mod:`cai.damage`,
-    :mod:`cai.interactions`, :mod:`cai.loading`, :mod:`cai.orchestrator`,
-    :mod:`cai.postprocess`
+Modules
+-------
+:mod:`cai.settings`     configuration loading, validation, overrides
+:mod:`cai.compdam`      CompDam property vector, flags, state variables
+:mod:`cai.layup`        plies, ply blocks, interfaces, CLT
+:mod:`cai.damage_map`   seeded delaminations and matrix cracks
+:mod:`cai.turon`        cohesive-zone length, element size, strength, penalty
+:mod:`cai.mesh2d`       fibre-aligned structured quad mesh of one ply
+:mod:`cai.model`        3-D extrusion, numbering, sets, surfaces
+:mod:`cai.inp_writer`   Abaqus/Explicit input deck
+:mod:`cai.jobfiles`     abaqus_v6.env, SLURM/PBS scripts, postprocess.py
+:mod:`cai.builder`      orchestration (CAIJob)
+:mod:`cai.validation`   NCAMP comparison helpers
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 class CAIError(Exception):

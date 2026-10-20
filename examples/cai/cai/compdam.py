@@ -213,8 +213,8 @@ def required_properties(flags):
     return names
 
 
-def build_property_vector(material, flags, thickness=None):
-    """Assemble the 40-entry ``*User Material`` constant vector.
+def property_values(material, flags, thickness=None):
+    """The 40 CompDam properties in input-deck order, ``None`` for blanks.
 
     Parameters
     ----------
@@ -228,9 +228,8 @@ def build_property_vector(material, flags, thickness=None):
 
     Returns
     -------
-    list of float
-        Exactly 40 values. Undefined properties are 0.0, which Abaqus passes
-        to CompDam the same way as a blank field.
+    list
+        40 entries; ``None`` marks a blank field (feature disabled).
 
     Raises
     ------
@@ -250,13 +249,61 @@ def build_property_vector(material, flags, thickness=None):
             % (flags, ", ".join(missing)))
 
     values = dict(flat)
-    values["feature_flags"] = feature_flags_as_float(flags)
+    values["feature_flags"] = int(feature_flags_as_float(flags))
     values["thickness"] = thickness
-    vector = []
-    for name in PROPERTY_ORDER:
-        v = values.get(name)
-        vector.append(0.0 if v is None else float(v))
-    return vector
+    return [values.get(name) for name in PROPERTY_ORDER]
+
+
+def build_property_vector(material, flags, thickness=None):
+    """Assemble the 40-entry property vector as floats (blank -> 0.0).
+
+    Parameters
+    ----------
+    material : dict
+        Material preset from ``config.MATERIALS``.
+    flags : int or str
+        Feature flags (material property 1).
+    thickness : float, optional
+        Material property 3.
+
+    Returns
+    -------
+    list of float
+        Exactly 40 values; 0.0 is what Abaqus passes to CompDam for a blank.
+    """
+    return [0.0 if v is None else float(v)
+            for v in property_values(material, flags, thickness)]
+
+
+def format_user_material(material, flags):
+    """Data lines of ``*User Material, constants=40`` (8 values per line).
+
+    Parameters
+    ----------
+    material : dict
+        Material preset.
+    flags : int or str
+        Feature flags.
+
+    Returns
+    -------
+    list of str
+        Five data lines; blank fields are left empty, exactly as in the
+        CompDam example decks.
+    """
+    vals = property_values(material, flags)
+    out = []
+    for i in range(0, 40, 8):
+        chunk = []
+        for v in vals[i:i + 8]:
+            if v is None:
+                chunk.append("")
+            elif isinstance(v, int):
+                chunk.append("%d" % v)
+            else:
+                chunk.append("%.10g" % v)
+        out.append(", ".join(chunk) + ("," if i < 32 else ""))
+    return out
 
 
 def max_element_size(material):

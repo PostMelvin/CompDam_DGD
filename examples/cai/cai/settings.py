@@ -19,7 +19,8 @@ from cai import compdam
 #: Top-level sections every configuration must define.
 REQUIRED_SECTIONS = (
     "MODEL", "GEOMETRY", "LAYUP", "MATERIALS", "NCAMP_BASELINE", "COMPDAM",
-    "MESH", "IMPACT", "DAMAGE", "BOUNDARY", "STEP", "INTERFACE", "JOB",
+    "MESH", "COHESIVE_ZONE", "IMPACT", "DAMAGE", "BOUNDARY", "STEP", "INTERFACE",
+    "JOB", "CLUSTER",
 )
 
 
@@ -36,7 +37,7 @@ def load_config(path=None):
     -------
     dict
         Deep copy of the upper-case sections, plus ``"_config_dir"`` (the
-        directory that holds the file, used to resolve relative paths).
+        directory that holds the file).
 
     Raises
     ------
@@ -56,26 +57,6 @@ def load_config(path=None):
         raise ConfigurationError("configuration %s lacks sections: %s" % (path, ", ".join(missing)))
     cfg["_config_dir"] = os.path.dirname(path)
     return cfg
-
-
-def resolve_path(cfg, path):
-    """Resolve a path from the configuration relative to the config file.
-
-    Parameters
-    ----------
-    cfg : dict
-        Loaded configuration.
-    path : str
-        Absolute path, or path relative to the configuration file.
-
-    Returns
-    -------
-    str
-        Absolute, normalised path.
-    """
-    if os.path.isabs(path):
-        return os.path.normpath(path)
-    return os.path.normpath(os.path.join(cfg.get("_config_dir", os.getcwd()), path))
 
 
 def active_material(cfg):
@@ -113,7 +94,7 @@ def validate(cfg):
     Returns
     -------
     list of str
-        Non-fatal warnings (e.g. a coarse mesh that may snap back).
+        Non-fatal warnings.
 
     Raises
     ------
@@ -125,49 +106,51 @@ def validate(cfg):
     L, W = float(g["length"]), float(g["width"])
     if L <= 0 or W <= 0:
         raise ConfigurationError("plate length and width must be positive")
-
     xc, yc = impact_center(cfg)
-    lz, wz = g["refine_zone_length"], g["refine_zone_width"]
-    es, inset = b["end_support_length"], b["side_support_inset"]
-    if not (es < xc - lz / 2.0 and xc + lz / 2.0 < L - es):
-        raise ConfigurationError(
-            "the refined zone (x = %.1f..%.1f) must lie between the end supports "
-            "(%.1f and %.1f)" % (xc - lz / 2.0, xc + lz / 2.0, es, L - es))
-    if not (inset < yc - wz / 2.0 and yc + wz / 2.0 < W - inset):
-        raise ConfigurationError(
-            "the refined zone (y = %.1f..%.1f) must lie between the side supports"
-            % (yc - wz / 2.0, yc + wz / 2.0))
-    if es <= 0.0:
-        raise ConfigurationError("end_support_length must be positive")
-    if inset < 0.0:
-        raise ConfigurationError("side_support_inset must be >= 0")
+    es, inset = float(b["end_support_length"]), float(b["side_support_inset"])
+    if not 0.0 < es < 0.5 * L:
+        raise ConfigurationError("end_support_length must lie in (0, length/2)")
+    if not 0.0 <= inset < 0.5 * W:
+        raise ConfigurationError("side_support_inset must lie in [0, width/2)")
+    if not (es < xc < L - es and inset < yc < W - inset):
+        raise ConfigurationError("the impact centre must lie inside the supports")
 
-    if not 0 < m["fine_size"] <= m["coarse_size"]:
-        raise ConfigurationError("need 0 < fine_size <= coarse_size")
-    if int(m["elements_per_ply"]) < 1:
-        raise ConfigurationError("elements_per_ply must be >= 1")
     if m["element_type"] != "C3D8R":
         raise ConfigurationError("only C3D8R is implemented (got %r)" % m["element_type"])
+    if float(m["coarse_size"]) <= 0 or float(m.get("growth_rate", 1.2)) <= 1.0:
+        raise ConfigurationError("need coarse_size > 0 and growth_rate > 1")
+    if int(m.get("elements_per_ply", 1)) < 1:
+        raise ConfigurationError("elements_per_ply must be >= 1")
+    if float(m.get("zone_margin", 0.0)) < 0.0:
+        raise ConfigurationError("zone_margin must be >= 0")
+    hg = str(m.get("hourglass_control", "ENHANCED")).upper()
+    if hg not in ("ENHANCED", "RELAX_STIFFNESS", "STIFFNESS", "DEFAULT"):
+        raise ConfigurationError("unknown hourglass_control %r" % hg)
 
     name, mat = active_material(cfg)
     flags = cfg["COMPDAM"]["feature_flags"]
-    compdam.build_property_vector(mat, flags)  # raises on missing properties
+    compdam.property_values(mat, flags)  # raises on missing properties
     f = compdam.parse_feature_flags(flags)
     if f["fiber_compression"] in (3, 4, 5):
         warnings.append(
-            "FKT fibre kinking is enabled: CompDam expects a fibre-aligned, uniform mesh; "
-            "the orthogonal mesh built here is fibre-aligned only for 0/90 plies")
+            "FKT fibre kinking is enabled: the random misalignment options (phi0 = 1/2/3) "
+            "need a uniform fibre-aligned mesh, which holds only inside the damage zones")
+        if not m.get("fiber_aligned", True):
+            raise ConfigurationError("FKT needs MESH fiber_aligned = True")
 
-    limits = compdam.max_element_size(mat)
-    for mode, lmax in sorted(limits.items()):
-        if m["fine_size"] > lmax:
-            warnings.append(
-                "fine_size %.2f mm exceeds the %s snap-back limit %.2f mm for %s"
-                % (m["fine_size"], mode, lmax, name))
-    if limits and m["coarse_size"] > min(limits.values()):
-        warnings.append(
-            "coarse_size %.2f mm exceeds the snap-back limit %.2f mm: damage must stay "
-            "inside the refined zone" % (m["coarse_size"], min(limits.values())))
+    cz = cfg["COHESIVE_ZONE"]
+    if float(cz.get("elements_in_zone", 3)) < 1:
+        raise ConfigurationError("COHESIVE_ZONE elements_in_zone must be >= 1")
+    if cz.get("min_element_size") is not None and float(cz["min_element_size"]) <= 0:
+        raise ConfigurationError("COHESIVE_ZONE min_element_size must be positive")
+
+    c = cfg["COMPDAM"]
+    lib, src = c.get("library_dir"), c.get("user_subroutine")
+    if not lib and not src:
+        raise ConfigurationError("set COMPDAM library_dir (pre-compiled) or user_subroutine")
+    if lib and "/path/to/" in str(lib):
+        warnings.append("COMPDAM library_dir is still the placeholder %r; set it to the "
+                        "directory of the compiled CompDam library on the cluster" % lib)
 
     if cfg["INTERFACE"]["type"] not in ("cohesive", "tie"):
         raise ConfigurationError("INTERFACE type must be 'cohesive' or 'tie'")
@@ -177,11 +160,14 @@ def validate(cfg):
         raise ConfigurationError("applied_displacement is an end shortening and must be > 0")
     if cfg["IMPACT"]["reference_energy"] <= cfg["IMPACT"].get("threshold_energy", 0.0):
         raise ConfigurationError("IMPACT reference_energy must exceed threshold_energy")
+    sched = str(cfg["CLUSTER"].get("scheduler") or "none").lower()
+    if sched not in ("slurm", "pbs", "none"):
+        raise ConfigurationError("CLUSTER scheduler must be 'slurm', 'pbs' or 'none'")
     return warnings
 
 
-def apply_overrides(cfg, material=None, energy=None, submit=None, interface=None,
-                    job_name=None, cpus=None):
+def apply_overrides(cfg, material=None, energy=None, interface=None, job_name=None,
+                    cpus=None, output_dir=None, library_dir=None, min_element_size=None):
     """Apply command-line overrides to a loaded configuration in place.
 
     Parameters
@@ -192,14 +178,18 @@ def apply_overrides(cfg, material=None, energy=None, submit=None, interface=None
         Material preset name.
     energy : float, optional
         Impact energy [J] (sets ``IMPACT["default_energy"]``).
-    submit : bool, optional
-        Submit the job after writing the input deck.
     interface : str, optional
         ``"cohesive"`` or ``"tie"``.
     job_name : str, optional
-        Base name of the model and job.
+        Base job name.
     cpus : int, optional
-        Number of CPUs and domains.
+        CPUs (and Explicit domains) in the cluster scripts.
+    output_dir : str, optional
+        Parent folder of the job folders.
+    library_dir : str, optional
+        Directory of the compiled CompDam library on the cluster.
+    min_element_size : float, optional
+        Floor on the damage-zone element size [mm].
 
     Returns
     -------
@@ -210,16 +200,18 @@ def apply_overrides(cfg, material=None, energy=None, submit=None, interface=None
         cfg["LAYUP"]["material"] = material
     if energy is not None:
         cfg["IMPACT"]["default_energy"] = float(energy)
-    if submit is not None:
-        cfg["JOB"]["submit"] = bool(submit)
     if interface is not None:
         cfg["INTERFACE"]["type"] = interface
     if job_name is not None:
         cfg["MODEL"]["job_name"] = job_name
-        cfg["MODEL"]["model_name"] = job_name
     if cpus is not None:
-        cfg["JOB"]["num_cpus"] = int(cpus)
-        cfg["JOB"]["num_domains"] = int(cpus)
+        cfg["CLUSTER"]["cpus"] = int(cpus)
+    if output_dir is not None:
+        cfg["JOB"]["output_dir"] = output_dir
+    if library_dir is not None:
+        cfg["COMPDAM"]["library_dir"] = library_dir
+    if min_element_size is not None:
+        cfg["COHESIVE_ZONE"]["min_element_size"] = float(min_element_size)
     return cfg
 
 

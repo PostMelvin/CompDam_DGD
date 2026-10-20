@@ -1,38 +1,29 @@
 """
-Build the CompDam_DGD Compression-After-Impact (CAI) model in Abaqus/CAE.
+Generate standalone CompDam_DGD Compression-After-Impact (CAI) jobs.
 
-Usage (from ``examples/cai``)::
+Plain Python (2.7 or 3.x, no packages, no Abaqus/CAE needed)::
 
-    abaqus cae noGUI=cai_model.py                        # default energy, write .inp only
-    abaqus cae noGUI=cai_model.py -- --energy 40         # one impact energy
-    abaqus cae noGUI=cai_model.py -- --sweep             # all IMPACT["energies"]
-    abaqus cae noGUI=cai_model.py -- --material IM7_8552 --submit --cpus 8
-    abaqus cae noGUI=cai_model.py -- --check             # validate config only
+    python cai_model.py                          # default energy -> jobs/<job>/
+    python cai_model.py --energy 40
+    python cai_model.py --sweep                  # every energy in IMPACT["energies"]
+    python cai_model.py --library-dir /apps/compdam/lib --cpus 32
+    python cai_model.py --check                  # validate + sizing summary, no mesh
+    abaqus python cai_model.py --energy 30       # also works with Abaqus' Python
 
-Inside an open CAE session: *File > Run Script...* (arguments cannot be
-passed; edit ``config.py`` instead).
+Each job folder holds ``<job>.inp``, ``abaqus_v6.env`` (usub_lib_dir -> your
+compiled CompDam library), ``submit.slurm``/``submit.pbs``, ``run.sh``,
+``postprocess.py`` and ``summary.txt``. Copy it to the cluster and submit.
 
-All engineering inputs live in ``config.py``; this script only parses
-command-line overrides and calls :func:`cai.orchestrator.run`.
+All engineering inputs live in ``config.py``.
 """
 
 from __future__ import division, print_function
 
 import argparse
-import inspect
 import os
 import sys
 
-
-def _script_dir():
-    """Directory of this script (``__file__`` is not always defined under CAE)."""
-    try:
-        return os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        return os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
-
-
-HERE = _script_dir()
+HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
@@ -41,63 +32,55 @@ from cai import settings  # noqa: E402
 
 
 def parse_args(argv):
-    """Parse the arguments that follow ``--`` on the Abaqus command line.
+    """Parse command-line arguments (a leading ``--`` is ignored).
 
     Parameters
     ----------
     argv : list of str
-        Full ``sys.argv``.
+        Arguments without the program name.
 
     Returns
     -------
     argparse.Namespace
     """
-    user = argv[argv.index("--") + 1:] if "--" in argv else []
-    p = argparse.ArgumentParser(prog="abaqus cae noGUI=cai_model.py --",
-                                description="Build the CompDam CAI model.")
+    argv = [a for a in argv if a != "--"]
+    p = argparse.ArgumentParser(description="Generate CompDam CAI job folders.")
     p.add_argument("--config", default=os.path.join(HERE, "config.py"),
                    help="configuration file (default: config.py next to this script)")
-    p.add_argument("--material", help="material preset name, e.g. AS4_8552 or IM7_8552")
+    p.add_argument("--material", help="material preset, e.g. AS4_8552 or IM7_8552")
     p.add_argument("--energy", type=float, help="impact energy [J]")
     p.add_argument("--sweep", action="store_true",
-                   help="build one model per energy in IMPACT['energies']")
+                   help="one job per energy in IMPACT['energies']")
     p.add_argument("--interface", choices=("cohesive", "tie"), help="ply-block interface type")
-    p.add_argument("--job-name", help="base model/job name")
-    p.add_argument("--cpus", type=int, help="number of CPUs/domains")
-    p.add_argument("--submit", action="store_true", help="submit the job(s) after writing")
+    p.add_argument("--job-name", help="base job name")
+    p.add_argument("--cpus", type=int, help="CPUs / Explicit domains in the cluster scripts")
+    p.add_argument("--output-dir", help="parent folder of the job folders")
+    p.add_argument("--library-dir", help="compiled CompDam library directory on the cluster")
+    p.add_argument("--min-element-size", type=float,
+                   help="floor on the damage-zone element size [mm] (COHESIVE_ZONE)")
     p.add_argument("--check", action="store_true",
-                   help="validate the configuration and print the summary, no Abaqus build")
-    return p.parse_args(user)
+                   help="validate the configuration and print the sizing summary only")
+    return p.parse_args(argv)
 
 
 def main(argv=None):
-    """Entry point.
-
-    Parameters
-    ----------
-    argv : list of str, optional
-        Defaults to ``sys.argv``.
-
-    Returns
-    -------
-    int
-        Exit code (0 on success).
-    """
-    args = parse_args(sys.argv if argv is None else argv)
+    """Entry point; returns the process exit code."""
+    args = parse_args(sys.argv[1:] if argv is None else argv)
     try:
         cfg = settings.load_config(args.config)
         settings.apply_overrides(cfg, material=args.material, energy=args.energy,
-                                 submit=True if args.submit else None,
                                  interface=args.interface, job_name=args.job_name,
-                                 cpus=args.cpus)
+                                 cpus=args.cpus, output_dir=args.output_dir,
+                                 library_dir=args.library_dir,
+                                 min_element_size=args.min_element_size)
         energies = list(cfg["IMPACT"]["energies"]) if args.sweep \
             else [cfg["IMPACT"]["default_energy"]]
+        from cai.builder import CAIJob, run
         if args.check:
-            for w in settings.validate(cfg):
-                print("WARNING: %s" % w)
-            print("Configuration OK for energies %s" % energies)
+            for e in energies:
+                print(CAIJob(cfg, e).report())
+                print("-" * 78)
             return 0
-        from cai.orchestrator import run  # needs the Abaqus kernel
         run(cfg, energies)
     except CAIError as exc:
         print("ERROR: %s" % exc)
@@ -106,6 +89,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    code = main()
-    if code:
-        sys.exit(code)
+    sys.exit(main())

@@ -112,8 +112,16 @@ class PlyBlock(object):
         return "BLOCK_%02d" % self.index
 
     @property
-    def instance_name(self):
-        return self.name + "-1"
+    def angles(self):
+        return [p.angle for p in self.plies]
+
+    def uniform_angle(self, tol=1e-9):
+        """Fibre angle shared by all plies, or None for a mixed-angle block."""
+        a0 = self.plies[0].angle
+        for p in self.plies[1:]:
+            if abs(((p.angle - a0) + 90.0) % 180.0 - 90.0) > tol:
+                return None
+        return a0
 
     def __repr__(self):
         return "PlyBlock(%d, plies %d-%d)" % (
@@ -196,6 +204,29 @@ def expand_sequence(sequence, symmetric=False):
     return angles
 
 
+def auto_blocks(angles, tol=1e-9):
+    """Group consecutive plies with the same fibre angle.
+
+    Parameters
+    ----------
+    angles : list of float
+        Stacking sequence [deg].
+
+    Returns
+    -------
+    list of int
+        Ply count of each block, bottom to top.
+    """
+    sizes = []
+    for i, a in enumerate(angles):
+        same = i > 0 and abs(((a - angles[i - 1]) + 90.0) % 180.0 - 90.0) < tol
+        if same:
+            sizes[-1] += 1
+        else:
+            sizes.append(1)
+    return sizes
+
+
 class Laminate(object):
     """Stacking sequence with ply coordinates and ply-block grouping.
 
@@ -205,10 +236,9 @@ class Laminate(object):
         Full stacking sequence from the back face (z = 0) upward [deg].
     ply_thickness : float
         Cured ply thickness [mm].
-    plies_per_block : int, optional
-        Number of consecutive plies per block (ignored if ``blocks`` given).
-    blocks : list of int, optional
-        Explicit ply counts per block, bottom to top. Must sum to the number
+    blocks : "auto" or list of int, optional
+        ``"auto"`` groups consecutive plies of equal angle; a list gives
+        explicit ply counts per block, bottom to top, summing to the number
         of plies.
 
     Attributes
@@ -219,15 +249,12 @@ class Laminate(object):
     thickness : float
     """
 
-    def __init__(self, angles, ply_thickness, plies_per_block=1, blocks=None):
+    def __init__(self, angles, ply_thickness, blocks="auto"):
         if ply_thickness is None or ply_thickness <= 0.0:
             raise ConfigurationError("ply thickness must be positive")
         n = len(angles)
-        if blocks is None:
-            k = int(plies_per_block)
-            if k < 1:
-                raise ConfigurationError("plies_per_block must be >= 1")
-            blocks = [k] * (n // k) + ([n % k] if n % k else [])
+        if blocks is None or blocks == "auto":
+            blocks = auto_blocks(angles)
         blocks = [int(b) for b in blocks]
         if any(b < 1 for b in blocks) or sum(blocks) != n:
             raise ConfigurationError(
@@ -268,7 +295,7 @@ class Laminate(object):
         """
         angles = expand_sequence(layup["sequence"], layup.get("symmetric", False))
         t = layup.get("ply_thickness") or material.get("ply_thickness")
-        return cls(angles, t, layup.get("plies_per_block", 1), layup.get("blocks"))
+        return cls(angles, t, layup.get("blocks", "auto"))
 
     @property
     def thickness(self):

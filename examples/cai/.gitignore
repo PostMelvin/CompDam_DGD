@@ -5,7 +5,8 @@ __pycache__/
 .pytest_cache/
 docs/_build/
 
-# Abaqus working directory and outputs
+# Generated job folders and Abaqus outputs
+jobs/
 abaqus_work/
 *.odb
 *.cae

@@ -1,145 +1,153 @@
 # Compression After Impact (CAI) with CompDam_DGD
 
-A modular, object-oriented Abaqus/CAE Python generator for an **ASTM D7137 Compression-After-Impact** model of a carbon/epoxy laminate. Intralaminar damage uses the NASA **CompDam_DGD** VUMAT; delaminations use surface-based cohesive contact.
+A **standalone** generator for an ASTM D7137 Compression-After-Impact model of a carbon/epoxy laminate. Intralaminar damage uses the NASA **CompDam_DGD** VUMAT; delaminations use surface-based cohesive contact.
 
-The model starts from an idealised impact damage state (seeded delaminations and matrix cracks) and simulates the quasi-static compression phase in Abaqus/Explicit.
+* **No Abaqus/CAE needed to build the model.** Plain Python (2.7 or 3.x, standard library only) writes the complete Abaqus/Explicit input deck.
+* **Fibre-aligned meshes.** Each ply block is meshed along its own fibre direction: parallelogram elements for ±45°, rectangles for 0/90°.
+* **Cohesive-zone driven refinement.** The delamination-zone element size comes from Turon et al. (2007). Interface strengths are lowered automatically when you choose a coarser mesh.
+* **Cluster-ready job folders.** Each folder holds `<job>.inp`, an `abaqus_v6.env` that points `usub_lib_dir` at your **pre-compiled CompDam library**, SLURM/PBS scripts and a standalone post-processor. Copy the folder to the cluster and submit; nothing refers back to this repository.
 
 ```
 examples/cai/
-├── config.py            # ALL inputs: geometry, layup, NCAMP-based materials, mesh, damage, BCs, solver, job
-├── cai_model.py         # entry point: abaqus cae noGUI=cai_model.py -- [options]
-├── cai_postprocess.py   # entry point: abaqus python cai_postprocess.py -- <job>.odb
+├── config.py          # ALL inputs: geometry, layup, materials (NCAMP), mesh, Turon sizing, damage, BCs, step, cluster
+├── cai_model.py       # CLI: python cai_model.py [--energy E | --sweep] [--library-dir DIR] ...
+├── cae_import.py      # optional: import a generated deck into Abaqus/CAE for viewing
 ├── cai/
-│   ├── settings.py          # load / validate / override the config         (pure Python)
-│   ├── compdam.py           # 40-constant property vector, flags, SDVs, ICs (pure Python)
-│   ├── layup.py             # plies, ply blocks, interfaces, CLT checks     (pure Python)
-│   ├── mesh_plan.py         # partition planes + edge-seeding rules         (pure Python)
-│   ├── damage_map.py        # delamination / matrix-crack footprints        (pure Python)
-│   ├── inp_patcher.py       # adds CompDam keywords CAE cannot write        (pure Python)
-│   ├── validation.py        # NCAMP comparison, CAI strength                (pure Python)
-│   ├── geometry.py          # parts, partitions, ply-aligned C3D8R mesh, assembly   (Abaqus)
-│   ├── material_section.py  # VUMAT material, section, ply orientations             (Abaqus)
-│   ├── damage.py            # damage element sets, bonded/delaminated surfaces      (Abaqus)
-│   ├── interactions.py      # cohesive contact pairs or ties                        (Abaqus)
-│   ├── loading.py           # explicit step, D7137 fixture BCs, outputs             (Abaqus)
-│   ├── orchestrator.py      # CAIModel: build -> write .inp -> patch -> submit      (Abaqus)
-│   └── postprocess.py       # ODB -> load/displacement CSV, CAI strength, KE/IE     (Abaqus)
-├── tests/test_pure.py   # pytest suite for the pure-Python modules
-├── docs/                # Sphinx (numpydoc via napoleon; Abaqus modules mocked)
-└── pyproject.toml       # uv project (tests and docs only)
+│   ├── settings.py    # load / validate / override the configuration
+│   ├── compdam.py     # 40-constant property vector, feature flags, SDVs, initial states
+│   ├── layup.py       # plies, ply blocks ("auto" = group equal angles), interfaces, CLT
+│   ├── damage_map.py  # seeded delaminations (conical, peanut-shaped) and matrix cracks
+│   ├── turon.py       # cohesive-zone length, element size, strength reduction, penalty
+│   ├── mesh2d.py      # fibre-aligned structured quad mesh of one ply
+│   ├── model.py       # 3-D extrusion, numbering, element/node sets, surfaces
+│   ├── inp_writer.py  # Abaqus/Explicit input deck
+│   ├── jobfiles.py    # abaqus_v6.env, submit.slurm / submit.pbs, run.sh, postprocess.py
+│   ├── builder.py     # CAIJob: config -> mesh -> job folder
+│   └── validation.py  # NCAMP comparison helpers
+├── tests/test_pure.py # pytest suite (meshes, Turon, deck consistency, job files)
+├── docs/              # Sphinx (numpydoc via napoleon)
+└── pyproject.toml     # uv project (tests and docs only; the generator has no dependencies)
 ```
 
-## Prerequisites
-
-1. **Abaqus 2023 or newer** with a working Fortran setup for user subroutines (CompDam ≥ 2.7 needs Abaqus 2023+). See [`usersubroutine-prerequisites.md`](../../usersubroutine-prerequisites.md).
-2. **CompDam set up**: from the repository root run `python setup.py`, or rename `for/version.for.nogit` to `for/version.for`.
-3. An `abaqus_v6.env` with the CompDam compiler flags (`-free -fpp -mkl=sequential`). The build copies [`tests/abaqus_v6.env`](../../tests/abaqus_v6.env) into the working directory if none exists there.
-4. Optional: [`uv`](https://docs.astral.sh/uv/) for the unit tests and documentation.
-
-## Running
-
-All commands run from `examples/cai/`.
+## Quick start
 
 ```bash
-# 0. Check the configuration without Abaqus (any Python 3)
-python cai_model.py -- --check
+cd examples/cai
 
-# 1. Build the model, save CAI_QI.cae and write the patched input deck (no solve)
-abaqus cae noGUI=cai_model.py
+# 1. Point the jobs at your compiled CompDam library on the cluster (or set
+#    COMPDAM["library_dir"] in config.py), then generate
+python cai_model.py --library-dir /apps/compdam/lib            # -> jobs/CAI_QI_AS4_8552_30J/
+python cai_model.py --sweep --library-dir /apps/compdam/lib    # one job per IMPACT["energies"]
+python cai_model.py --check                                    # validation + Turon sizing only
 
-# 2. Other options
-abaqus cae noGUI=cai_model.py -- --energy 40               # one impact energy [J]
-abaqus cae noGUI=cai_model.py -- --sweep                   # every energy in IMPACT["energies"]
-abaqus cae noGUI=cai_model.py -- --material IM7_8552
-abaqus cae noGUI=cai_model.py -- --interface tie           # bonded blocks (debug/baseline)
-abaqus cae noGUI=cai_model.py -- --submit --cpus 8         # build, write, submit, wait
+# 2. Copy the job folder to the cluster and submit
+scp -r jobs/CAI_QI_AS4_8552_30J cluster:/scratch/me/
+ssh cluster 'cd /scratch/me/CAI_QI_AS4_8552_30J && sbatch submit.slurm'
 ```
 
-Results go to `JOB["work_dir"]` (default `abaqus_work/`). To solve the written deck yourself:
+The batch script runs:
 
 ```bash
-cd abaqus_work
-abaqus job=CAI_QI_AS4_8552_30J user=../../../for/CompDam_DGD.for double=both cpus=4 interactive
+abaqus job=CAI_QI_AS4_8552_30J input=CAI_QI_AS4_8552_30J.inp double=both cpus=16 \
+       parallel=domain domains=16 mp_mode=mpi interactive
+abaqus python postprocess.py CAI_QI_AS4_8552_30J.odb
 ```
 
-`double=both` is required: CompDam only runs in double precision. Jobs submitted from the script use `DOUBLE_PLUS_PACK` for the same reason.
+There is no `user=`: Abaqus loads CompDam from `usub_lib_dir` in the job's `abaqus_v6.env`. `double=both` is mandatory for CompDam.
 
-From an open CAE session, use *File → Run Script… → cai_model.py*. Arguments cannot be passed there, so edit `config.py` instead.
+Other CLI options: `--energy`, `--material IM7_8552`, `--interface tie`, `--cpus`, `--output-dir`, `--min-element-size`, `--job-name`, `--config`. The generator also runs under `abaqus python cai_model.py ...`.
 
-### Post-processing
+### Compiled library
+
+Build the library once on the cluster, as described in CompDam's [readme](../../readme.md#building-a-shared-library):
 
 ```bash
-cd abaqus_work
-abaqus python ../cai_postprocess.py -- CAI_QI_AS4_8552_30J.odb --energy 30
+cd CompDam_DGD/for && cp ../tests/abaqus_v6.env . && abaqus make library=CompDam_DGD
 ```
 
-This writes `<job>_load_displacement.csv` and prints:
+Point `COMPDAM["library_dir"]` (or `--library-dir`) at that directory.
 
-* the peak load,
-* the CAI strength σ_CAI = P_max / (w·h) per ASTM D7137,
-* the difference from the NCAMP value,
-* the quasi-static check: max ALLKE/ALLIE should stay below about 5 %.
+To compile at run time instead, set `library_dir = None` and `user_subroutine = "/abs/path/CompDam_DGD.for"`. The env file then carries the Intel Fortran flags and the command gets `user=...`.
 
-## What the model contains
+### Job folder contents
+
+| File | Purpose |
+|---|---|
+| `<job>.inp` | complete flat Abaqus/Explicit deck (nodes, C3D8R elements, sets, orientations, CompDam material, contact, BCs, step, outputs) |
+| `abaqus_v6.env` | `usub_lib_dir = '<library_dir>'` (plus `MPI_FLUSH_FCACHE`, from CompDam's sample env) |
+| `submit.slurm` / `submit.pbs` | batch script built from `CLUSTER` (cpus, memory, walltime, partition, account, modules) |
+| `run.sh` | the same commands for an interactive node |
+| `postprocess.py` | standalone `abaqus python` script: load–displacement CSV, peak load, σ_CAI = P_max/(w·h), NCAMP delta, ALLKE/ALLIE check |
+| `summary.txt` | laminate, CLT stiffness, damage seed, Turon sizing, per-block mesh statistics, NCAMP table, warnings |
+
+## Fibre-aligned meshing
+
+Each ply block gets its own structured quad mesh, extruded with `elements_per_ply` C3D8R layers per ply:
+
+* **Damage zone (fibre-aligned).** Inside a parallelogram with two edges along the fibres and two along an axis, the grid is uniform. One edge family follows the fibre direction exactly and the other is the axis most nearly perpendicular to it. For 0° and 90° the zone is a rectangle; for ±45° the elements are rhombi with 45°/135° corners. Edges are `h` long in both directions.
+* **Zone size per block.** The zone covers the seeded delaminations of the block's own interfaces, its matrix-crack disks and `zone_margin` (room for delamination growth). Plies near the impact face therefore get smaller zones than plies near the back face (the cone).
+* **Outside the zone.** The rows and columns of the same structured grid are graded geometrically (`growth_rate`) up to `coarse_size`. The knife-edge lines are exact node lines. The end-clamp strips take every node with x ≤ `end_support_length`. Forcing that line through the slanted rows of a ±45° zone would create sliver elements, so it is not a node line.
+* **Ply blocks.** `LAYUP["blocks"] = "auto"` groups consecutive plies with the same angle. The default `[45/0/-45/90]_3s` gives 23 blocks (the mid-plane 90/90 pair is one block) and 22 cohesive interfaces. Blocks share no nodes; general contact joins them, so their meshes need not match.
+* **Quality checks.** Every block is checked for positive Jacobians and exact plate coverage. `summary.txt` lists element counts, the fibre-aligned element count, the minimum corner angle and the maximum aspect ratio. The highest aspect ratios (≈ coarse/fine) are in the coarse cross-bands outside the damage zone, which stay elastic.
+
+## Delamination-zone element size (Turon et al. 2007)
+
+`cai/turon.py` implements Turon et al.'s engineering solution for mesh-size effects in cohesive zone models (Eng. Fract. Mech. 74, 2007):
+
+| Quantity | Equation |
+|---|---|
+| cohesive zone length | l_cz = M · E · G_c / τ₀², with M = 9π/32 |
+| element size | l_e = l_cz / N_e, with N_e ≥ 3 |
+| strength for a chosen l_e | τ₀' = √(9π · E · G_c / (32 · N_e · l_e)) |
+| penalty stiffness | K = α · E₃ / t, with α = 50 |
+
+l_cz is evaluated for mode I (E₃) and mode II (G₁₂ following Harper & Hallett 2008, or E₃ via `mode_II_modulus`). The smaller value governs. For the AS4/8552 defaults:
+
+```
+l_cz,I = 0.61 mm, l_cz,II = 0.42 mm  ->  Turon element size l_e = 0.14 mm (N_e = 3)
+min_element_size = 0.30 mm           ->  strengths reduced 62.3/92.3 -> 51.4/62.9 MPa (3 elements in zone)
+K = 50 * 9600 / 0.188 = 2.55e6 N/mm^3
+```
+
+The damage-zone element size is max(Turon size, `min_element_size`), capped at the CompDam snap-back limit. When the floor is active and `reduce_strength = True`, the strengths are lowered with Turon's formula: the fracture toughness is unchanged and N_e elements still span the cohesive zone. Set `min_element_size = None` to mesh at the full Turon size of 0.14 mm. That costs about 5× the elements of the 0.3 mm default. The same size is used for CompDam's intralaminar elements, well below their snap-back limit (0.82 mm).
+
+**Model size.** The defaults (0.3 mm damage zone, 23 blocks) give about 1.26 M C3D8R elements and 2.5 M nodes. Generation takes ~30 s and the `.inp` is ~200 MB. For scoping runs, use `--min-element-size 0.5` (about 0.5 M elements). Note that a large K can lower the stable time increment; check the `.sta` file and reduce `penalty_alpha` towards 50 if needed.
+
+## Rest of the model
 
 | Aspect | Implementation |
 |---|---|
-| Geometry | 150 × 100 mm plate (ASTM D7137). X = loading direction, Z = thickness; ply 1 at z = 0 (back face), impact face at z = t |
-| Layup | `[45/0/-45/90]_3s` with 0.188 mm plies: 24 plies, 4.51 mm thick (D7137 asks for 4–6 mm) |
-| Ply blocks | One part per block (default: one ply per block, so 24 parts and 23 interfaces). Change with `plies_per_block` or an explicit `blocks` list |
-| Elements | C3D8R, Explicit library, **enhanced hourglass control**, **distortion control** (CompDam requirement), average-strain kinematic split |
-| Ply-aligned through-thickness mesh | Cells are cut at every ply boundary, so element faces coincide with ply interfaces; `elements_per_ply` (default 1) elements through each ply |
-| Ply orientation | One rotated rectangular CSYS per ply (1 = fibre, 3 = stacking direction) assigned as a material orientation |
-| In-plane mesh | Structured hex mesh: uniform `fine_size` in the refined zone around the impact, single-bias grading to `coarse_size` toward the clamps; identical in every block, so interface nodes coincide |
-| CompDam material | `*User Material, constants=40` built from `config.MATERIALS` in CompDam order; `*Depvar` (19 SDVs for flags `111101`) with CompDam names; `*Characteristic Length, definition=USER, components=3` |
-| Impact damage | Conical, peanut-shaped delaminations (ellipse along the fibre direction of the ply below each interface), circular matrix-crack zones (`CDM_d2 = 1`, `CDM_alpha = 0`), optional fibre damage. Radii scale with √((E − E_th)/(E_ref − E_th)) |
-| Interfaces | Bonded regions: cohesive contact (quadratic-traction initiation, BK energy evolution) + friction. Seeded delaminations: frictional hard contact only. Or ties (`--interface tie`) |
-| Fixture BCs | Loaded end kinematically coupled (U1) to `RP_LOAD`; reacting end U1 = 0; anti-rotation end strips U3 = 0 on both faces; side knife edges U3 = 0 on both faces; U2 = 0 on the centre line at x = 0 |
-| Step | Explicit dynamic, NLGEOM on (CompDam requirement), smooth-step displacement ramp, semi-automatic mass scaling to a target Δt, bulk viscosity |
-| Outputs | S, LE, U, RF, SDV, CSTRESS, CSDMG fields; energy histories; RP U1/RF1 |
-
-### Keywords added after `writeInput()`
-
-Abaqus/CAE cannot write some keywords CompDam needs, so `cai/inp_patcher.py` adds them to the `.inp` text. The patched deck is plain text you can diff:
-
-* the state-variable names under `*Depvar`,
-* `*Characteristic Length, definition=USER, components=3` (calls CompDam's VUCHARLENGTH),
-* `*Initial Conditions, type=SOLUTION` for the `CDM_PRISTINE`, `CDM_MATRIX_CRACK` and `CDM_FIBER_DAMAGE` sets (`CDM_STATUS = 1` everywhere),
-* the `COMPDAM_PARAM` table collection for non-default model parameters (`COMPDAM["parameters_float"/"parameters_int"]`).
+| Geometry | 150 × 100 mm (ASTM D7137). X = loading, Z = thickness; ply 1 at z = 0 (back face), impact face at z = t |
+| Layup | `[45/0/-45/90]_3s`, 0.188 mm plies, 4.51 mm |
+| Elements | C3D8R, `*Section Controls`: distortion control (CompDam requirement), enhanced hourglass, average-strain kinematic split; one `*Orientation` per ply (1 = fibre, 3 = stacking direction) |
+| CompDam material | `*User Material, constants=40` in CompDam order with blank fields for unused properties; named `*Depvar` (19 SDVs for flags `111101`); `*Characteristic Length, definition=USER, components=3`; non-default parameters in the `COMPDAM_PARAM` table collection |
+| Impact damage | Conical, peanut-shaped delaminations (ellipse along the fibre direction of the ply below each interface) and matrix-crack disks (`CDM_d2 = 1`, `CDM_alpha = 0`) set via `*Initial Conditions, type=SOLUTION`; optional fibre damage. Radii scale with √((E − E_th)/(E_ref − E_th)) |
+| Interfaces | General contact (`ALL EXTERIOR`). Bonded regions: cohesive behaviour (QUADS initiation, BK energy evolution) + friction. Seeded delaminations: friction only. Optional `*Tie` (`--interface tie`) |
+| Fixture BCs | Loaded end kinematically coupled (U1) to `RP_LOAD`, which is driven by a smooth-step displacement; reacting end U1 = 0; end clamp strips U3 = 0 on both faces; knife edges U3 = 0 on both faces at y = inset and y = W − inset; U2 = 0 on one node line at x = 0 |
+| Step | Explicit, NLGEOM, fixed mass scaling to a target Δt, bulk viscosity; outputs S, LE, SDV, U, RF, CSTRESS, CSDMG, energies, RP U1/RF1 |
 
 ## NCAMP validation workflow
 
-`config.py` holds two kinds of material data on purpose:
+`config.py` separates the values fed to CompDam (`MATERIALS`) from the NCAMP reference values (`NCAMP_BASELINE`: lamina RTD properties and the laminate CAI strength at 1500 in-lbf/in, i.e. 6.67 J/mm). `summary.txt` tabulates the model inputs against the NCAMP lamina values. The job's `postprocess.py` compares the predicted CAI strength with the NCAMP value.
 
-* **`MATERIALS`**: the values fed to CompDam (lamina elastic and strength data plus fracture properties, which NCAMP does not report).
-* **`NCAMP_BASELINE`**: the NCAMP reference values. These are the lamina RTD properties and the laminate CAI strength at 1500 in-lbf/in (6.67 J/mm).
+Before you use the numbers quantitatively:
 
-Every build prints a table of model inputs against the NCAMP lamina values with the % difference. The post-processor compares the predicted CAI strength with `NCAMP_BASELINE[...]["cai"]["cai_strength"]`.
-
-**Before you use the numbers quantitatively:**
-
-1. Open the NCAMP report revision you validate against (the AS4/8552 tape report is NCP-RP-2010-002 / CAM-RP-2010-002; see the NIAR/NCAMP website). Enter its values in `NCAMP_BASELINE`, choosing the condition (RTD) and basis (mean vs. B-basis, normalised vs. as-measured), then set `"verified": True`. The shipped values are representative and flagged `NOT verified`.
-2. Make `MATERIALS["AS4_8552"]` consistent with that baseline. Calibrate the fibre fracture toughnesses (`GXT`, `GXC`); they are currently the IM7/8552 values from CompDam's `tests/IM7-8552-C3D.inp`.
-3. Calibrate the damage seed with your own C-scans. Use the projected damage area and depth distribution at the impact energies in `IMPACT["energies"]` to set `radius_front`, `radius_back` and `aspect_ratio`.
+1. Enter the values from the NCAMP report revision you validate against (AS4/8552 tape: NCP-RP-2010-002 / CAM-RP-2010-002), then set `"verified": True`. The shipped values are representative and flagged `NOT verified`.
+2. Calibrate `GXT` and `GXC` for AS4/8552. They are currently the IM7/8552 values from CompDam's `tests/IM7-8552-C3D.inp`.
+3. Calibrate the damage seed (`radius_front`, `radius_back`, `aspect_ratio`) against your C-scans, and keep `zone_margin` large enough to hold the delamination growth before failure.
 4. Run `--sweep` and compare CAI strength vs. impact energy with the NCAMP/test data.
 
-The CLT membrane modulus printed at build time gives a quick check of the initial slope of the load-displacement curve: K ≈ E_x·w·t / L_free.
+## Limitations
 
-## Practical notes and limitations
-
-* **Model size.** The defaults (0.8 mm fine mesh, one ply per block) give roughly 10 k elements per ply and about 235 k C3D8R elements in total. For quick checks, set `plies_per_block = 2` (or `blocks = [...]`) and `fine_size = 1.0`.
-* **Snap-back limit.** `validate()` warns when an element exceeds 2EG/σ² for a mode. The coarse outer mesh exceeds the matrix limit on purpose; damage must stay inside the refined zone, so enlarge it if damage reaches its edge.
-* **In-plane fibre alignment.** The mesh is orthogonal in-plane, so it is fibre-aligned for 0° and 90° plies only. CompDam's matrix-crack DGD and max-strain fibre models work on non-aligned meshes, because VUCHARLENGTH computes the characteristic lengths in material directions. The **fibre-kinking (FKT) models with random misalignment (φ0 = 1/2/3) need a uniform, fibre-aligned mesh**, which this generator does not build. It warns if FKT flags are set.
-* **Ties and coupling.** With `--interface tie`, tie secondary nodes on the loaded end are also in the kinematic coupling. Abaqus may report over-constraints there. Tie mode is meant for debugging and baselines.
-* **Hourglass control.** `ENHANCED` is used as requested. If your Abaqus release rejects it with the VUMAT, set `MESH["hourglass_control"] = "RELAX_STIFFNESS"`.
-* **Quasi-static loading.** Check ALLKE/ALLIE after each run. If it is too high, lengthen `STEP["time_period"]` or reduce mass scaling.
-* **Element deletion** is off, following the CompDam guidance (`COMPDAM["element_deletion"]`). `terminate_on_no_convergence = 0` deletes the rare element where DGD fails to converge instead of aborting the run.
+* The fibre-aligned region is each block's damage zone. Outside it the grid is graded and no longer fibre-aligned, which is acceptable where the material stays elastic. CompDam's FKT models with random misalignment (φ0 = 1/2/3) assume a uniform fibre-aligned mesh, which therefore holds only inside the zones.
+* Near-perpendicular delaminations in a ±45° block (e.g. a 90° ellipse) make the parallelogram large. If it would reach the supports, it is clipped and `summary.txt` lists a warning; check those blocks' margins.
+* Not yet run in Abaqus from this environment (no Abaqus here). The deck is checked structurally by the tests: every referenced set and surface is defined, every element references existing nodes, every hex has a positive volume, and every keyword the model needs is present. Submit a short trial first (e.g. `STEP["time_period"]` 1e-4 and `--min-element-size 1.0`).
 
 ## Tests and documentation (uv)
 
 ```bash
-uv run pytest                                                    # pure-Python unit tests
-uv run --group docs sphinx-build -b html docs docs/_build/html   # API docs (Abaqus mocked)
+uv run pytest                                                    # 38 tests, ~3 s
+uv run --group docs sphinx-build -b html docs docs/_build/html   # API docs
 ```
 
-The Abaqus builders follow Python 2.7/3 compatible syntax because Abaqus 2023 ships Python 2.7 and Abaqus 2024+ ships Python 3.
+Optional visual check in CAE: `abaqus cae noGUI=cae_import.py -- jobs/<job>/<job>.inp` writes `<job>.cae`.
