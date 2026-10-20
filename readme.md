@@ -596,7 +596,7 @@ Previous versions of CompDam (<=2.6.1) used a file named `CompDam.parameters` in
 
 
 ## Example problems
-The [`examples/`](examples/) directory includes example models that use CompDam along with corresponding files that defined the expected results. Currently, examples are available for a [double cantilever beam (DCB) problem](examples/interlaminar/readme.md). Additional examples are planned for future releases.
+The [`examples/`](examples/) directory includes example models that use CompDam along with corresponding files that defined the expected results. Currently, examples are available for a [double cantilever beam (DCB) problem](examples/interlaminar/readme.md) and a [compression after impact (CAI) model generator](examples/cai/README.md) for Abaqus/CAE. Additional examples are planned for future releases.
 
 
 ## Test models

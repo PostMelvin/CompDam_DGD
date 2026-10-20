@@ -1,0 +1,29 @@
+# uv / Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+docs/_build/
+
+# Abaqus working directory and outputs
+abaqus_work/
+*.odb
+*.cae
+*.jnl
+*.rpy*
+*.rec
+*.lck
+*.sta
+*.msg
+*.dat
+*.log
+*.prt
+*.sim
+*.com
+*.abq
+*.pac
+*.sel
+*.res
+*.stt
+*.mdl
+*.exception

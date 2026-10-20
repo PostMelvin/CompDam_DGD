@@ -1,0 +1,27 @@
+[project]
+name = "compdam-cai"
+version = "0.1.0"
+description = "Abaqus/Explicit Compression-After-Impact model generator for the NASA CompDam_DGD VUMAT"
+readme = "README.md"
+license = { text = "NASA Open Source Agreement (see repository LICENSE.txt)" }
+# The model builders run inside the Abaqus kernel (Python 2.7 for Abaqus 2023,
+# Python 3.10+ for Abaqus 2024+). This environment covers the pure-Python
+# modules, unit tests and documentation only; Abaqus is not a pip dependency.
+requires-python = ">=3.9"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4",
+]
+docs = [
+    "sphinx>=7.0",
+]
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
